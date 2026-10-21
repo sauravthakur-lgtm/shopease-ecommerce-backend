@@ -256,4 +256,40 @@ export class ProductsService {
       products,
     };
   }
+  async getProductById(id: string) {
+  const product = await this.prisma.product.findFirst({
+    where: {
+      id,
+      status: ProductStatus.APPROVED,
+    },
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      price: true,
+      stock: true,
+      status: true,
+      imageUrl: true,
+      category: true,
+      createdAt: true,
+      updatedAt: true,
+      vendor: {
+        select: {
+          id: true,
+          name: true,
+        },
+      },
+    },
+  });
+
+  if (!product) {
+    const { NotFoundException } = await import('@nestjs/common');
+    throw new NotFoundException('Product not found.');
+  }
+
+  return {
+    success: true,
+    product,
+  };
+}
 }

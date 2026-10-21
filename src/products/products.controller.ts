@@ -197,4 +197,24 @@ export class ProductsController {
   ) {
     return this.productsService.getApprovedProducts(category, query);
   }
+
+    // Public: Get a single approved product by ID
+  @Public()
+  @Get(':id')
+  @ApiOperation({ summary: 'Get a single approved product by ID' })
+  @ApiParam({
+    name: 'id',
+    description: 'Product UUID',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Product details returned successfully',
+  })
+  @ApiResponse({
+    status: 404,
+    description: 'Product not found or not approved',
+  })
+  getProductById(@Param('id') id: string) {
+    return this.productsService.getProductById(id);
+  }
 }
