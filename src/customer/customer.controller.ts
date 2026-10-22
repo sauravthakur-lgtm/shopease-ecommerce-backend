@@ -54,16 +54,37 @@ export class CustomerController {
 
 
 @Patch('profile')
-@ApiOperation({ summary: 'Update customer profile' })
+@ApiOperation({
+  summary: 'Update customer profile (first name, last name, email, phone, profile image)',
+})
 @ApiResponse({
   status: 200,
   description: 'Customer profile updated successfully',
+})
+@ApiResponse({
+  status: 400,
+  description: 'Invalid profile data or email',
+})
+@ApiResponse({
+  status: 401,
+  description: 'Missing or invalid bearer token',
+})
+@ApiResponse({
+  status: 403,
+  description: 'Customer role required',
+})
+@ApiResponse({
+  status: 404,
+  description: 'Customer profile not found',
 })
 updateProfile(
   @Req() req: AuthenticatedRequest,
   @Body() dto: UpdateCustomerProfileDto,
 ) {
-  return this.customerService.updateProfile(req.user.userId, dto);
+  return this.customerService.updateProfile(
+    req.user.userId,
+    dto,
+  );
 }
 
 @Post('addresses')
