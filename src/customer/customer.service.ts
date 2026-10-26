@@ -66,9 +66,7 @@ async updateProfile(
       id: customerId,
       role: 'CUSTOMER',
     },
-    select: {
-      id: true,
-    },
+    select: { id: true },
   });
 
   if (!customer) {
@@ -76,30 +74,17 @@ async updateProfile(
   }
 
   const updatedCustomer = await this.prisma.user.update({
-    where: {
-      id: customerId,
-    },
+    where: { id: customerId },
     data: {
-      ...(dto.firstName !== undefined && {
-        firstName: dto.firstName,
-      }),
-      ...(dto.lastName !== undefined && {
-        lastName: dto.lastName,
-      }),
-      ...(dto.email !== undefined && {
-        email: dto.email,
-      }),
-      ...(dto.phone !== undefined && {
-        phone: dto.phone,
-      }),
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.phone !== undefined && { phone: dto.phone }),
       ...(dto.profileImage !== undefined && {
         profileImage: dto.profileImage,
       }),
     },
     select: {
       id: true,
-      firstName: true,
-      lastName: true,
+      name: true,
       email: true,
       phone: true,
       profileImage: true,
@@ -113,6 +98,7 @@ async updateProfile(
     profile: updatedCustomer,
   };
 }
+
 async createAddress(
   customerId: string,
   dto: CreateCustomerAddressDto,

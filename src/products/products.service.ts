@@ -2,17 +2,44 @@ import {
   Injectable,
   BadRequestException,
   NotFoundException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProductDto } from './dto/create-product.dto';
 import { Prisma, ProductStatus } from '@prisma/client';
 import { readFile, unlink } from 'node:fs/promises';
 import { basename } from 'node:path';
+import { RedisService } from '../redis/redis.service';
+
+const approvedProductSelect = {
+  id: true,
+  name: true,
+  description: true,
+  price: true,
+  stock: true,
+  status: true,
+  imageUrl: true,
+  category: true,
+  vendor: {
+    select: {
+      id: true,
+      name: true,
+    },
+  },
+} satisfies Prisma.ProductSelect;
+
+type ApprovedProduct = Prisma.ProductGetPayload<{
+  select: typeof approvedProductSelect;
+}>;
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(ProductsService.name);
 
+  constructor(
+  private readonly prisma: PrismaService,
+  private readonly redisService: RedisService,
+) {}
   // Create product
   async createProduct(vendorId: string, dto: CreateProductDto) {
     const product = await this.prisma.product.create({
@@ -356,13 +383,38 @@ export class ProductsService {
     category?: string,
     query?: string,
   ) {
+    const normalizedCategory = category?.trim();
+    const normalizedQuery = query?.trim();
+    const cacheKey = `products:approved:${JSON.stringify([
+      normalizedCategory?.toLowerCase() ?? null,
+      normalizedQuery?.toLowerCase() ?? null,
+    ])}`;
+
+    try {
+      const cachedProducts =
+        await this.redisService.get<ApprovedProduct[]>(cacheKey);
+
+      if (cachedProducts !== null) {
+        this.logger.log('Approved products cache HIT');
+        return {
+          success: true,
+          count: cachedProducts.length,
+          products: cachedProducts,
+        };
+      }
+
+      this.logger.log('Approved products cache MISS');
+    } catch (error) {
+      this.logger.warn(
+        `Redis cache read failed; querying the database: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
     const where: Prisma.ProductWhereInput = {
       status: ProductStatus.APPROVED,
     };
-
-    const normalizedCategory = category?.trim();
-    const normalizedQuery = query?.trim();
-
     if (normalizedCategory) {
       where.category = {
         equals: normalizedCategory,
@@ -390,23 +442,18 @@ export class ProductsService {
     const products = await this.prisma.product.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        price: true,
-        stock: true,
-        status: true,
-        imageUrl: true,
-        category: true,
-        vendor: {
-          select: {
-            id: true,
-            name: true,
-          },
-        },
-      },
+      select: approvedProductSelect,
     });
+
+    try {
+      await this.redisService.set(cacheKey, products, 300);
+    } catch (error) {
+      this.logger.warn(
+        `Redis cache write failed; returning database results: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
 
     return {
       success: true,

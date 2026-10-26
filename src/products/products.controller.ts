@@ -73,7 +73,7 @@ export class ProductsController {
   @ApiOperation({ summary: 'Upload a product image without authentication' })
   @ApiResponse({ status: 201, description: 'Uploaded image URL returned' })
   @ApiResponse({
-    status: 400,
+    status: 400, 
     description: 'Unsupported image type or file too large',
   })
   uploadProductImage(@UploadedFile() file?: Express.Multer.File) {

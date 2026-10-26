@@ -13,7 +13,7 @@ import { CartModule } from './cart/cart.module';
 import { WishlistModule } from './wishlist/wishlist.module';
 import { PaymentsModule } from './payments/payments.module';
 import { CustomerModule } from './customer/customer.module';
-
+import { RedisModule } from './redis/redis.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -27,6 +27,7 @@ import { CustomerModule } from './customer/customer.module';
     WishlistModule,
     PaymentsModule,
     CustomerModule,
+    RedisModule,
   ],
   controllers: [AppController],
   providers: [AppService],
