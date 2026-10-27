@@ -14,6 +14,7 @@ import { WishlistModule } from './wishlist/wishlist.module';
 import { PaymentsModule } from './payments/payments.module';
 import { CustomerModule } from './customer/customer.module';
 import { RedisModule } from './redis/redis.module';
+import { ReviewsModule } from './reviews/reviews.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -28,6 +29,7 @@ import { RedisModule } from './redis/redis.module';
     PaymentsModule,
     CustomerModule,
     RedisModule,
+    ReviewsModule
   ],
   controllers: [AppController],
   providers: [AppService],

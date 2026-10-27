@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto } from './dto/create-order.dto/create-order.dto';
@@ -10,6 +11,8 @@ import { MailService } from '../mail/mail.service';
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly mailService: MailService,
@@ -69,7 +72,14 @@ export class OrdersService {
       });
     });
 
-  
+    await this.sendOrderConfirmation(
+      customerId,
+      order.id,
+      order.status,
+      order.totalAmount,
+      [{ productName: order.product.name, quantity: order.quantity }],
+    );
+
     return {
       success: true,
       message: 'Order placed successfully',
@@ -197,10 +207,65 @@ export class OrdersService {
     return newOrder;
   });
 
+  await this.sendOrderConfirmation(
+    customerId,
+    order.id,
+    order.status,
+    order.totalAmount,
+    order.items.map((item) => ({
+      productName: item.product.name,
+      quantity: item.quantity,
+    })),
+  );
+
   return {
     success: true,
     message: 'Order placed successfully',
     order,
   };
 }
+
+  private async sendOrderConfirmation(
+    customerId: string,
+    orderId: string,
+    status: string,
+    totalAmount: Prisma.Decimal,
+    items: Array<{ productName: string; quantity: number }>,
+  ) {
+    try {
+      const customer = await this.prisma.user.findUnique({
+        where: { id: customerId },
+        select: { name: true, email: true },
+      });
+
+      if (!customer) {
+        throw new Error(`Customer ${customerId} was not found`);
+      }
+
+      const itemDetails = items
+        .map((item) => `- ${item.productName}: quantity ${item.quantity}`)
+        .join('\n');
+      const text = [
+        `Hello ${customer.name},`,
+        '',
+        'Your order has been placed successfully.',
+        `Order ID: ${orderId}`,
+        'Products:',
+        itemDetails,
+        `Total amount: ${totalAmount.toString()}`,
+        `Order status: ${status}`,
+      ].join('\n');
+
+      await this.mailService.sendEmail(
+        customer.email,
+        'Your ShopEase order confirmation',
+        text,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to send confirmation email for order ${orderId}`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
 }

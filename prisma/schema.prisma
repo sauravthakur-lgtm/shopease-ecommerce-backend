@@ -34,6 +34,7 @@ model User {
   resetPasswordToken   String?
   resetPasswordExpires DateTime?
   addresses            CustomerAddress[]
+  reviews Review[]
 }
 
 
@@ -66,6 +67,7 @@ model Product {
 
     cartItems     CartItem[]
   wishlistItems WishlistItem[]
+  reviews Review[]
 }
 
 enum OrderStatus {
@@ -168,4 +170,20 @@ model CustomerAddress {
   customer User @relation(fields: [customerId], references: [id], onDelete: Cascade)
 
   @@index([customerId])
+}
+
+model Review {
+  id         String   @id @default(uuid())
+  customerId String
+  productId  String
+  rating     Int
+  comment    String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  customer User    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  product  Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([customerId, productId])
+  @@index([productId])
 }
