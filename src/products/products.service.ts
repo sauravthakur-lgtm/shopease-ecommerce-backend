@@ -1,15 +1,24 @@
 import {
   Injectable,
   BadRequestException,
+  ConflictException,
   NotFoundException,
   Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateProductDto } from './dto/create-product.dto';
-import { Prisma, ProductStatus } from '@prisma/client';
+import { Prisma, ProductStatus, UserRole } from '@prisma/client';
 import { readFile, unlink } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { RedisService } from '../redis/redis.service';
+import {
+  getProductCategoryAliases,
+  normalizeProductCategory,
+} from './product-category';
+import {
+  validateProductCsv,
+} from './bulk-product-upload';
+import { UpdateProductDto } from './dto/update-product.dto';
 
 const approvedProductSelect = {
   id: true,
@@ -47,7 +56,7 @@ export class ProductsService {
         name: dto.name,
         description: dto.description,
         imageUrl: dto.imageUrl ?? null,
-        category: dto.category.trim(),
+        category: normalizeProductCategory(dto.category),
         price: new Prisma.Decimal(dto.price),
         stock: dto.stock,
         vendorId,
@@ -72,6 +81,226 @@ export class ProductsService {
       message: 'Product created successfully. Waiting for admin approval.',
       product,
     };
+  }
+
+  async updateProduct(
+    productId: string,
+    userId: string,
+    role: UserRole,
+    dto: UpdateProductDto,
+  ) {
+    if (!Object.values(dto).some((value) => value !== undefined)) {
+      throw new BadRequestException('At least one product field must be provided.');
+    }
+
+    const where: Prisma.ProductWhereUniqueInput = { id: productId };
+    const product = await this.prisma.product.findUnique({
+      where,
+      select: { id: true, vendorId: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found.');
+    }
+    if (role === UserRole.VENDOR && product.vendorId !== userId) {
+      throw new NotFoundException('Product not found.');
+    }
+
+    const updatedProduct = await this.prisma.product.update({
+      where,
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+        ...(dto.description !== undefined
+          ? { description: dto.description?.trim() || null }
+          : {}),
+        ...(dto.category !== undefined
+          ? { category: normalizeProductCategory(dto.category) }
+          : {}),
+        ...(dto.price !== undefined
+          ? { price: new Prisma.Decimal(dto.price) }
+          : {}),
+        ...(dto.stock !== undefined ? { stock: dto.stock } : {}),
+        ...(dto.imageUrl !== undefined
+          ? { imageUrl: dto.imageUrl || null }
+          : {}),
+        ...(role === UserRole.VENDOR ? { status: ProductStatus.PENDING } : {}),
+      },
+      select: {
+        id: true,
+        name: true,
+        description: true,
+        imageUrl: true,
+        category: true,
+        price: true,
+        stock: true,
+        status: true,
+        vendorId: true,
+        updatedAt: true,
+      },
+    });
+
+    return {
+      success: true,
+      message:
+        role === UserRole.VENDOR
+          ? 'Product updated and submitted for admin approval.'
+          : 'Product updated successfully.',
+      product: updatedProduct,
+    };
+  }
+
+  async deleteProduct(productId: string, userId: string, role: UserRole) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      select: { id: true, vendorId: true },
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found.');
+    }
+    if (role === UserRole.VENDOR && product.vendorId !== userId) {
+      throw new NotFoundException('Product not found.');
+    }
+
+    const [legacyOrders, itemOrders] = await Promise.all([
+      this.prisma.order.count({ where: { productId } }),
+      this.prisma.orderItem.count({ where: { productId } }),
+    ]);
+    if (legacyOrders > 0 || itemOrders > 0) {
+      throw new ConflictException(
+        'This product has order history and cannot be deleted.',
+      );
+    }
+
+    try {
+      await this.prisma.product.delete({ where: { id: productId } });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2003'
+      ) {
+        throw new ConflictException(
+          'This product has order history and cannot be deleted.',
+        );
+      }
+      throw error;
+    }
+
+    return {
+      success: true,
+      message: 'Product deleted successfully.',
+      productId,
+    };
+  }
+
+  async bulkUploadProducts(
+    vendorId: string,
+    file?: Express.Multer.File,
+    validateOnly = false,
+  ) {
+    if (!file?.buffer) {
+      throw new BadRequestException('A CSV file is required.');
+    }
+
+    const candidates = validateProductCsv(file.buffer);
+    const validCandidates = candidates.filter((candidate) => candidate.dto);
+    const names = [...new Set(validCandidates.map((candidate) => candidate.dto!.name))];
+    const existingProducts = names.length
+      ? await this.prisma.product.findMany({
+          where: {
+            vendorId,
+            name: { in: names, mode: 'insensitive' },
+          },
+          select: { name: true, category: true },
+        })
+      : [];
+    const knownProducts = new Set(
+      existingProducts.map((product) =>
+        this.getBulkDuplicateKey(product.name, product.category ?? ''),
+      ),
+    );
+
+    for (const candidate of candidates) {
+      if (!candidate.dto) continue;
+
+      const duplicateKey = this.getBulkDuplicateKey(
+        candidate.dto.name,
+        candidate.dto.category,
+      );
+      if (knownProducts.has(duplicateKey)) {
+        candidate.dto = undefined;
+        candidate.errors.push({
+          row: candidate.row,
+          field: 'name',
+          message: 'A product with this name and category already exists for your account.',
+        });
+      } else {
+        knownProducts.add(duplicateKey);
+      }
+    }
+
+    const errors = candidates.flatMap((candidate) => candidate.errors);
+    const rowPreviews = candidates.map((candidate) => ({
+      row: candidate.row,
+      name: candidate.values.name ?? '',
+      description: candidate.values.description ?? '',
+      category: candidate.values.category ?? '',
+      price: candidate.values.price ?? '',
+      stock: candidate.values.stock ?? '',
+      valid: candidate.errors.length === 0,
+      errors: candidate.errors,
+    }));
+
+    if (validateOnly) {
+      return {
+        success: true,
+        message: 'CSV validation completed.',
+        totalRows: candidates.length,
+        validRows: candidates.length - new Set(errors.map((error) => error.row)).size,
+        failedRows: new Set(errors.map((error) => error.row)).size,
+        rows: rowPreviews,
+        errors,
+      };
+    }
+
+    let successful = 0;
+    const successfulRows: number[] = [];
+
+    for (const candidate of candidates) {
+      if (!candidate.dto) continue;
+
+      try {
+        await this.createProduct(vendorId, candidate.dto);
+        successful += 1;
+        successfulRows.push(candidate.row);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        this.logger.error(
+          `Bulk product import failed for vendor ${vendorId}, CSV row ${candidate.row}: ${detail}`,
+        );
+        candidate.errors.push({
+          row: candidate.row,
+          field: 'product',
+          message: 'The product could not be saved because of a server error.',
+        });
+      }
+    }
+
+    const finalErrors = candidates.flatMap((candidate) => candidate.errors);
+    const failedRows = new Set(finalErrors.map((error) => error.row)).size;
+
+    return {
+      success: failedRows === 0,
+      message: 'Bulk import completed.',
+      totalRows: candidates.length,
+      successful,
+      failed: failedRows,
+      successfulRows,
+      errors: finalErrors,
+    };
+  }
+
+  private getBulkDuplicateKey(name: string, category: string) {
+    return `${name.trim().toLocaleLowerCase('en')}\u0000${normalizeProductCategory(category).toLocaleLowerCase('en')}`;
   }
 
   // Upload product image
@@ -177,9 +406,15 @@ export class ProductsService {
       orderBy: { category: 'asc' },
     });
 
-    const names = categories.flatMap((product) =>
-      product.category === null ? [] : [product.category],
-    );
+    const names = [
+      ...new Set(
+        categories.flatMap((product) =>
+          product.category === null
+            ? []
+            : [normalizeProductCategory(product.category)],
+        ),
+      ),
+    ].sort((a, b) => a.localeCompare(b, 'en'));
 
     return {
       success: true,
@@ -257,7 +492,7 @@ export class ProductsService {
 
     if (normalizedCategory) {
       primaryWhere.category = {
-        equals: normalizedCategory,
+        in: getProductCategoryAliases(normalizedCategory),
         mode: 'insensitive',
       };
     }
@@ -302,13 +537,12 @@ export class ProductsService {
       // If a category was selected, get fallback products
       // from other categories to fill the results.
     if (normalizedCategory) {
-  similarWhere.NOT = {
-    category: {
-      equals: normalizedCategory,
-      mode: 'insensitive',
-    },
-  };
-}
+      similarWhere.NOT = {
+        OR: getProductCategoryAliases(normalizedCategory).map((alias) => ({
+          category: { equals: alias, mode: 'insensitive' as const },
+        })),
+      };
+    }
 
       similarProducts = await this.prisma.product.findMany({
         where: similarWhere,
@@ -417,7 +651,7 @@ export class ProductsService {
     };
     if (normalizedCategory) {
       where.category = {
-        equals: normalizedCategory,
+        in: getProductCategoryAliases(normalizedCategory),
         mode: 'insensitive',
       };
     }

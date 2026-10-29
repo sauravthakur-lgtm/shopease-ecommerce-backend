@@ -7,10 +7,16 @@ import {
   Patch,
   Body,
   Post,
-  Param
+  Param,
+  Delete,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
+  ApiBody,
+  ApiConsumes,
   ApiOperation,
   ApiResponse,
   ApiTags,
@@ -23,13 +29,18 @@ import type { AuthenticatedRequest } from '../auth/interfaces/authenticated-requ
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
 import { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
+import { ProfileService } from '../profiles/profile.service';
+import { profileImageUploadOptions } from '../profiles/profile-image-upload';
 @ApiTags('Customer')
 @Controller('customer')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('CUSTOMER')
 @ApiBearerAuth('access-token')
 export class CustomerController {
-  constructor(private readonly customerService: CustomerService) {}
+  constructor(
+    private readonly customerService: CustomerService,
+    private readonly profileService: ProfileService,
+  ) {}
 
   @Get('profile')
   @ApiOperation({
@@ -87,6 +98,31 @@ updateProfile(
   );
 }
 
+@Post('profile/image')
+@UseInterceptors(FileInterceptor('image', profileImageUploadOptions))
+@ApiConsumes('multipart/form-data')
+@ApiBody({
+  schema: {
+    type: 'object',
+    required: ['image'],
+    properties: { image: { type: 'string', format: 'binary' } },
+  },
+})
+@ApiOperation({ summary: 'Upload a profile image for the authenticated customer' })
+@ApiResponse({ status: 201, description: 'Customer profile image updated' })
+@ApiResponse({ status: 400, description: 'Invalid or missing image file' })
+@ApiResponse({ status: 413, description: 'Image exceeds the 5 MiB upload limit' })
+uploadProfileImage(
+  @Req() req: AuthenticatedRequest,
+  @UploadedFile() file?: Express.Multer.File,
+) {
+  return this.profileService.uploadProfileImage(
+    req.user.userId,
+    'CUSTOMER',
+    file,
+  );
+}
+
 @Post('addresses')
 @ApiOperation({ summary: 'Add a customer address' })
 @ApiResponse({ status: 201, description: 'Address added successfully' })
@@ -112,6 +148,19 @@ updateAddress(
     addressId,
     dto,
   );
+}
+
+@Delete('addresses/:id')
+@ApiOperation({ summary: 'Delete one of the authenticated customer addresses' })
+@ApiResponse({ status: 200, description: 'Address deleted successfully' })
+@ApiResponse({ status: 404, description: 'Address not found' })
+@ApiResponse({ status: 401, description: 'Missing or invalid bearer token' })
+@ApiResponse({ status: 403, description: 'Customer role required' })
+deleteAddress(
+  @Req() req: AuthenticatedRequest,
+  @Param('id') addressId: string,
+) {
+  return this.customerService.deleteAddress(req.user.userId, addressId);
 }
   @Get('orders')
   @ApiOperation({

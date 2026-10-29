@@ -8,6 +8,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CreateOrderDto } from './dto/create-order.dto/create-order.dto';
 import { ProductStatus, Prisma } from '@prisma/client';
 import { MailService } from '../mail/mail.service';
+import { CouponsService } from '../coupons/coupons.service';
+import { CheckoutCouponDto } from '../coupons/dto/checkout-coupon.dto';
 
 @Injectable()
 export class OrdersService {
@@ -16,6 +18,7 @@ export class OrdersService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly mailService: MailService,
+    private readonly couponsService: CouponsService,
   ) {}
 
   async createOrder(customerId: string, dto: CreateOrderDto) {
@@ -37,8 +40,6 @@ export class OrdersService {
       throw new BadRequestException('Insufficient stock');
     }
 
-    const totalAmount = product.price.mul(dto.quantity);
-
     const order = await this.prisma.$transaction(async (tx) => {
       const stockUpdate = await tx.product.updateMany({
         where: {
@@ -57,12 +58,32 @@ export class OrdersService {
         );
       }
 
+      const currentProduct = await tx.product.findUnique({
+        where: { id: product.id },
+      });
+      if (!currentProduct) {
+        throw new NotFoundException('Product not found');
+      }
+      const subtotal = currentProduct.price.mul(dto.quantity);
+
+      const coupon = dto.couponCode
+        ? await this.couponsService.reserveForOrder(
+            tx,
+            dto.couponCode,
+            subtotal,
+            customerId,
+          )
+        : undefined;
+
       return tx.order.create({
         data: {
           customerId,
           productId: product.id,
           quantity: dto.quantity,
-          totalAmount: new Prisma.Decimal(totalAmount),
+          totalAmount: coupon?.totalAmount ?? subtotal,
+          couponId: coupon?.couponId,
+          couponCode: coupon?.couponCode,
+          discountAmount: coupon?.discountAmount ?? new Prisma.Decimal(0),
         },
         include: {
           product: {
@@ -121,7 +142,7 @@ export class OrdersService {
       orders,
     };
   }
-  async checkout(customerId: string) {
+  async checkout(customerId: string, dto?: CheckoutCouponDto) {
   const cart = await this.prisma.cart.findUnique({
     where: { customerId },
     include: {
@@ -151,13 +172,14 @@ export class OrdersService {
     }
   }
 
-  const totalAmount = cart.items.reduce(
-    (total, item) =>
-      total.add(item.product.price.mul(item.quantity)),
-    new Prisma.Decimal(0),
-  );
-
   const order = await this.prisma.$transaction(async (tx) => {
+    const purchasedItems: Array<{
+      productId: string;
+      quantity: number;
+      priceAtPurchase: Prisma.Decimal;
+    }> = [];
+    let subtotal = new Prisma.Decimal(0);
+
     for (const item of cart.items) {
       const stockUpdate = await tx.product.updateMany({
         where: {
@@ -175,20 +197,44 @@ export class OrdersService {
           `Product ${item.product.name} is unavailable or stock is insufficient`,
         );
       }
+
+      const currentProduct = await tx.product.findUnique({
+        where: { id: item.productId },
+        select: { price: true },
+      });
+      if (!currentProduct) {
+        throw new BadRequestException(
+          `Product ${item.product.name} is unavailable`,
+        );
+      }
+      subtotal = subtotal.add(currentProduct.price.mul(item.quantity));
+      purchasedItems.push({
+        productId: item.productId,
+        quantity: item.quantity,
+        priceAtPurchase: currentProduct.price,
+      });
     }
+
+    const coupon = dto?.couponCode
+      ? await this.couponsService.reserveForOrder(
+          tx,
+          dto.couponCode,
+          subtotal,
+          customerId,
+        )
+      : undefined;
 
     const newOrder = await tx.order.create({
       data: {
         customerId,
         productId: cart.items[0].productId,
         quantity: cart.items[0].quantity,
-        totalAmount,
+        totalAmount: coupon?.totalAmount ?? subtotal,
+        couponId: coupon?.couponId,
+        couponCode: coupon?.couponCode,
+        discountAmount: coupon?.discountAmount ?? new Prisma.Decimal(0),
         items: {
-          create: cart.items.map((item) => ({
-            productId: item.productId,
-            quantity: item.quantity,
-            priceAtPurchase: item.product.price,
-          })),
+          create: purchasedItems,
         },
       },
       include: {

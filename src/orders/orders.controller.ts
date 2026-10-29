@@ -7,6 +7,7 @@ import {
 } from '@nestjs/swagger';
 import { OrdersService } from './orders.service';
 import { CreateOrderDto } from './dto/create-order.dto/create-order.dto';
+import { CheckoutCouponDto } from '../coupons/dto/checkout-coupon.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -44,7 +45,10 @@ export class OrdersController {
   @ApiResponse({ status: 201, description: 'Checkout created' })
   @ApiResponse({ status: 401, description: 'Missing or invalid bearer token' })
   @ApiResponse({ status: 403, description: 'Customer role required' })
-  checkout(@Req() req: AuthenticatedRequest) {
-    return this.ordersService.checkout(req.user.userId);
+  checkout(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto?: CheckoutCouponDto,
+  ) {
+    return this.ordersService.checkout(req.user.userId, dto);
   }
 }

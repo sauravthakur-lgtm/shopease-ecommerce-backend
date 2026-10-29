@@ -26,6 +26,8 @@ export class CustomerService {
         email: true,
         phone: true,
         profileImage: true,
+        role: true,
+        isActive: true,
         createdAt: true,
         updatedAt: true,
         addresses: {
@@ -49,6 +51,8 @@ export class CustomerService {
         email: customer.email,
         phone: customer.phone,
         profileImage: customer.profileImage,
+        role: customer.role,
+        isActive: customer.isActive,
         createdAt: customer.createdAt,
         updatedAt: customer.updatedAt,
       },
@@ -167,26 +171,34 @@ async updateAddress(
     throw new NotFoundException('Address not found');
   }
 
-  const address = await this.prisma.customerAddress.update({
-    where: {
-      id: addressId,
-    },
-    data: {
-      ...(dto.fullName !== undefined && { fullName: dto.fullName }),
-      ...(dto.phone !== undefined && { phone: dto.phone }),
-      ...(dto.addressLine1 !== undefined && {
-        addressLine1: dto.addressLine1,
-      }),
-      ...(dto.addressLine2 !== undefined && {
-        addressLine2: dto.addressLine2,
-      }),
-      ...(dto.city !== undefined && { city: dto.city }),
-      ...(dto.state !== undefined && { state: dto.state }),
-      ...(dto.postalCode !== undefined && {
-        postalCode: dto.postalCode,
-      }),
-      ...(dto.country !== undefined && { country: dto.country }),
-    },
+  const address = await this.prisma.$transaction(async (tx) => {
+      if (dto.isDefault) {
+        await tx.customerAddress.updateMany({
+          where: { customerId },
+          data: { isDefault: false },
+        });
+      }
+
+      return tx.customerAddress.update({
+        where: { id: addressId },
+        data: {
+          ...(dto.fullName !== undefined && { fullName: dto.fullName }),
+          ...(dto.phone !== undefined && { phone: dto.phone }),
+          ...(dto.addressLine1 !== undefined && {
+            addressLine1: dto.addressLine1,
+          }),
+          ...(dto.addressLine2 !== undefined && {
+            addressLine2: dto.addressLine2,
+          }),
+          ...(dto.city !== undefined && { city: dto.city }),
+          ...(dto.state !== undefined && { state: dto.state }),
+          ...(dto.postalCode !== undefined && {
+            postalCode: dto.postalCode,
+          }),
+          ...(dto.country !== undefined && { country: dto.country }),
+          ...(dto.isDefault !== undefined && { isDefault: dto.isDefault }),
+        },
+      });
   });
 
   return {
@@ -194,6 +206,35 @@ async updateAddress(
     message: 'Address updated successfully',
     address,
   };
+}
+
+async deleteAddress(customerId: string, addressId: string) {
+  const existingAddress = await this.prisma.customerAddress.findFirst({
+    where: { id: addressId, customerId },
+    select: { id: true, isDefault: true },
+  });
+  if (!existingAddress) {
+    throw new NotFoundException('Address not found');
+  }
+
+  await this.prisma.$transaction(async (tx) => {
+    await tx.customerAddress.delete({ where: { id: addressId } });
+    if (existingAddress.isDefault) {
+      const nextAddress = await tx.customerAddress.findFirst({
+        where: { customerId },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true },
+      });
+      if (nextAddress) {
+        await tx.customerAddress.update({
+          where: { id: nextAddress.id },
+          data: { isDefault: true },
+        });
+      }
+    }
+  });
+
+  return { success: true, message: 'Address deleted successfully' };
 }
 
 async getMyOrders(customerId: string) {
@@ -246,9 +287,6 @@ async getMyOrders(customerId: string) {
 } 
 
 }
-
-
-
 
 
 

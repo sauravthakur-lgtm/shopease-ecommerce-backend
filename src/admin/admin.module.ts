@@ -5,6 +5,7 @@ import { AdminService } from './admin.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { ProductsModule } from '../products/products.module';
+import { ProfileService } from '../profiles/profile.service';
 @Module({
   imports: [
   PrismaModule,
@@ -12,6 +13,6 @@ import { ProductsModule } from '../products/products.module';
   ProductsModule,
 ],
   controllers: [AdminController],
-  providers: [AdminService],
+  providers: [AdminService, ProfileService],
 })
 export class AdminModule {}

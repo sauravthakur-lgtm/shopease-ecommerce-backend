@@ -78,18 +78,47 @@ enum OrderStatus {
   CANCELLED
 }
 
+enum CouponDiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+model Coupon {
+  id                    String             @id @default(uuid())
+  code                  String             @unique
+  discountType          CouponDiscountType
+  discountValue         Decimal            @db.Decimal(10, 2)
+  minimumOrderAmount    Decimal?           @db.Decimal(10, 2)
+  maximumDiscountAmount Decimal?           @db.Decimal(10, 2)
+  expiresAt             DateTime
+  maxTotalUses          Int?
+  maxUsesPerCustomer    Int?
+  currentUsageCount     Int                @default(0)
+  isActive              Boolean            @default(true)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  orders Order[]
+
+  @@index([isActive, expiresAt])
+}
+
 model Order {
   id          String      @id @default(uuid())
   customerId  String
   productId   String
   quantity    Int
   totalAmount Decimal     @db.Decimal(10, 2)
+  couponId    String?
+  couponCode  String?
+  discountAmount Decimal  @default(0) @db.Decimal(10, 2)
   status      OrderStatus @default(PENDING)
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
   customer User    @relation(fields: [customerId], references: [id])
   product  Product @relation(fields: [productId], references: [id])
+  coupon   Coupon? @relation(fields: [couponId], references: [id], onDelete: SetNull)
 
   items OrderItem[]
 

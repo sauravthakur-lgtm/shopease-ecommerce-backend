@@ -57,6 +57,79 @@ $ npm run test:e2e
 $ npm run test:cov
 ```
 
+## Profile API
+
+Authenticated customers use the existing `GET` and `PATCH /api/customer/profile` routes; the GET response continues to include saved addresses. Admins use `GET` and `PATCH /api/admin/profile`, and vendors use `GET` and `PATCH /api/vendor/profile`. Each route requires a bearer JWT with the matching role and derives the profile user ID from that token.
+
+PATCH accepts only `name`, `phone`, and an optional `profileImage` URL (or `null` to clear the URL). Email, role, account status, password, and other fields cannot be changed through these endpoints. Upload a profile image as multipart form data with field `image` to `POST /api/customer/profile/image`, `/api/vendor/profile/image`, or `/api/admin/profile/image`, using the corresponding role token. JPEG, PNG, and WebP files up to 5 MiB are accepted; the server validates both declared content type and file signature, stores a UUID-named file in `uploads/profiles`, and persists its relative `/uploads/profiles/...` URL in the existing `User.profileImage` column. Static images are served under `/uploads/profiles/`.
+
+### Product editing and removal
+
+- `PATCH /api/vendor/products/:id` allows a vendor to update `name`, `description`, `category`, `price`, `stock`, and/or `imageUrl` on their own product. Ownership is checked against the JWT user ID; vendors cannot set `status`, `vendorId`, or other protected fields. Vendor edits set the product back to `PENDING` for admin review.
+- `DELETE /api/vendor/products/:id` deletes only the authenticated vendor's own product.
+- `PATCH /api/admin/products/:id` allows admins to update the same product fields for any product. Product status is not mass-assigned; admins continue to use the existing approve endpoint for approval.
+- `DELETE /api/admin/products/:id` allows admins to delete any product.
+
+Products referenced by legacy orders or order items cannot be deleted (`409 Conflict`) so order history is preserved. Unreferenced products may be deleted; related cart, wishlist, and review rows follow the schema's existing cascade rules. Product updates use the existing category normalization and product-field validation. To make edits, send a JSON body containing only the fields to change, for example `{"price":24.99,"stock":12}`. A blank `description` or `imageUrl` clears that optional field.
+
+### Vendor deactivation
+
+`PATCH /api/admin/vendors/:id/deactivate` deactivates the selected vendor without deleting the account or order history. Existing approved products are set to `PENDING` so they are no longer listed publicly; they require admin approval if the vendor is later activated again. Authentication checks the current account state, so existing vendor JWTs stop working immediately. The existing `PATCH /api/admin/vendors/:id/approve` endpoint can activate the vendor again.
+
+Customer addresses are created with `POST /api/customer/addresses`, updated with `PATCH /api/customer/addresses/:id` (send `{"isDefault":true}` to set the default), and deleted with `DELETE /api/customer/addresses/:id`. Deleting the default address automatically promotes the oldest remaining address.
+
+### Vendor dashboard and sales
+
+Vendor-only endpoints use the JWT subject as the vendor ID:
+
+- `GET /api/vendor/dashboard?period=daily|weekly|monthly` returns own-product counts by approval status, low-stock count (stock at or below 5), distinct orders containing own products grouped by status, gross sales history, and best sellers.
+- Optional `startDate` and `endDate` are validated ISO date query parameters and use the same inclusive UTC range rules as admin analytics.
+- `GET /api/vendor/orders?page=1&limit=20` returns paginated orders with only the authenticated vendor's product lines. It does not expose customer details or full order totals.
+- `PATCH /api/vendor/products/:id/stock` accepts `{"stock":12}` and only updates a product when both its ID and authenticated vendor ID match.
+
+Vendor sales include only `CONFIRMED`, `SHIPPED`, and `DELIVERED` orders, matching existing admin paid-sales analytics; pending and cancelled orders are excluded. Multi-item order totals use `OrderItem.quantity * priceAtPurchase`; older orders without order items use their legacy product/quantity and `totalAmount + discountAmount`. Values are gross product line sales before order-level coupon discounts, because discounts are not attributed to lines/vendors. The schema has no commission, vendor-earnings, or payout model, so these metrics are not a payout or net earnings calculation.
+
+### Vendor CSV bulk product upload
+
+The vendor dashboard supports a two-step CSV workflow:
+
+- `GET /api/vendor/products/bulk-upload/template` downloads the sample CSV. Requires a vendor bearer JWT.
+- `POST /api/vendor/products/bulk-upload?validateOnly=true` validates the file and returns row previews without creating products.
+- `POST /api/vendor/products/bulk-upload` (or `?validateOnly=false`) imports valid rows and returns a row-level result.
+
+Send multipart form data with a single `file` field. The upload requires an authenticated `VENDOR` JWT; ownership always comes from the JWT and neither `vendorId` nor product status can be supplied in the CSV.
+
+Required, lower-case CSV headers are `name`, `category`, `price`, and `stock`. `description` and `imageUrl` are optional. The template format is:
+
+```csv
+name,description,category,price,stock,imageUrl
+"Everyday Tote","A roomy tote bag, made for daily errands","Clothes",29.99,25,
+```
+
+CSV text must be valid UTF-8. Quoted commas, escaped quotes, and embedded line breaks are supported. Unknown, duplicated, or missing required headers and malformed CSV structure are rejected. Price and stock use the existing `CreateProductDto` rules: price must be greater than zero with at most two decimal places; stock must be an integer from 0 to 1,000,000. Category is required, at most 100 characters, and uses the existing category normalization; known aliases are canonicalized and other non-empty names remain allowed. If supplied, `imageUrl` must match the existing local product-upload URL format; external URLs are not fetched. Every created product is `PENDING` for admin review.
+
+Files are limited to 2 MiB and 500 product rows. The upload is held in memory only and is not retained. Each valid row is created sequentially using the existing product creation service. Invalid rows are not created; the response reports successful/failed counts and row, field, and message details. The validation response includes preview rows and their validity.
+
+Duplicate detection is scoped to the authenticated vendor and compares trimmed, case-insensitive product names plus normalized categories. The first matching row in a file is eligible; later rows with the same key fail. A row matching an existing vendor product also fails, regardless of price or description. There is no database uniqueness constraint for this composite key, so simultaneous uploads can still race; the check prevents ordinary repeat imports but is not a global idempotency guarantee.
+
+Example import response:
+
+```json
+{
+  "success": false,
+  "message": "Bulk import completed.",
+  "totalRows": 2,
+  "successful": 1,
+  "failed": 1,
+  "successfulRows": [2],
+  "errors": [
+    { "row": 3, "field": "price", "message": "price must not be less than 0.01" }
+  ]
+}
+```
+
+Malformed files and invalid headers return the standard NestJS `400` error response instead of a row result. Row validation errors use the `errors` array above. To test in Postman, sign in as an active vendor and copy the JWT; request the template using that bearer token; create a `POST` to the bulk-upload path with `Authorization: Bearer <token>` and `Body` → `form-data` → key `file` (type **File**); first set query `validateOnly=true` to inspect the preview, then submit the same file with `validateOnly=false` or no query to import. Admin approval remains a separate workflow. ZIP/image archive import and cross-upload locking are not supported.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

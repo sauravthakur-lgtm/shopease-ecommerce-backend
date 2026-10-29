@@ -7,6 +7,7 @@ import type {
   AuthenticatedUser,
   UserRole,
 } from '../interfaces/authenticated-user.interface';
+import { PrismaService } from '../../prisma/prisma.service';
 
 interface JwtPayload {
   sub: string;
@@ -34,23 +35,35 @@ function isJwtPayload(payload: unknown): payload is JwtPayload {
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
-  constructor(configService: ConfigService) {
+  constructor(
+    configService: ConfigService,
+    private readonly prisma: PrismaService,
+  ) {
+    const secret = configService.getOrThrow<string>('JWT_SECRET');
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: configService.getOrThrow<string>('JWT_SECRET'),
+      secretOrKey: secret,
     });
   }
 
-  validate(payload: unknown): AuthenticatedUser {
+  async validate(payload: unknown): Promise<AuthenticatedUser> {
     if (!isJwtPayload(payload)) {
       throw new UnauthorizedException('Invalid token payload');
     }
 
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.sub },
+      select: { id: true, email: true, role: true, isActive: true },
+    });
+    if (!user || !user.isActive || user.role !== payload.role) {
+      throw new UnauthorizedException('Your account is inactive or no longer available.');
+    }
+
     return {
-      userId: payload.sub,
-      email: payload.email,
-      role: payload.role,
+      userId: user.id,
+      email: user.email,
+      role: user.role,
     };
   }
 }

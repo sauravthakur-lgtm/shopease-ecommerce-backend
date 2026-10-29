@@ -1,11 +1,18 @@
 
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, MaxLength, IsUrl } from 'class-validator';
+import {
+  IsOptional,
+  IsString,
+  IsUrl,
+  Matches,
+  MaxLength,
+} from 'class-validator';
 
 export class UpdateCustomerProfileDto {
   @ApiPropertyOptional({ example: 'Saurav Thakur' })
   @IsOptional()
   @IsString()
+  @Matches(/\S/, { message: 'name must contain a non-whitespace character' })
   @MaxLength(100)
   name?: string;
 

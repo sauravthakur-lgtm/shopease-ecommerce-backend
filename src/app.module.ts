@@ -15,6 +15,8 @@ import { PaymentsModule } from './payments/payments.module';
 import { CustomerModule } from './customer/customer.module';
 import { RedisModule } from './redis/redis.module';
 import { ReviewsModule } from './reviews/reviews.module';
+import { CouponsModule } from './coupons/coupons.module';
+import { VendorModule } from './vendor/vendor.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -29,7 +31,9 @@ import { ReviewsModule } from './reviews/reviews.module';
     PaymentsModule,
     CustomerModule,
     RedisModule,
-    ReviewsModule
+    ReviewsModule,
+    CouponsModule,
+    VendorModule,
   ],
   controllers: [AppController],
   providers: [AppService],

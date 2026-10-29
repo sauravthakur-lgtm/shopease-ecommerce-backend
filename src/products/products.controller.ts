@@ -2,7 +2,9 @@
 import {
   Body,
   Controller,
+  Delete,
   Post,
+  Patch,
   Get,
   Req,
   Query,
@@ -30,6 +32,8 @@ import {
   ApiQuery,
 } from '@nestjs/swagger';
 import type { AuthenticatedRequest } from '../auth/interfaces/authenticated-request.interface';
+import { UserRole } from '@prisma/client';
+import { UpdateProductDto } from './dto/update-product.dto';
 
 @ApiTags('Products')
 @Controller('products')
@@ -54,6 +58,50 @@ export class ProductsController {
     @Body() dto: CreateProductDto,
   ) {
     return this.productsService.createProduct(req.user.userId, dto);
+  }
+
+  @Patch(':id')
+  @Roles('VENDOR')
+  @ApiBearerAuth('access-token')
+  @ApiOperation({
+    summary: "Update a product owned by the authenticated vendor",
+    description:
+      'Vendor edits resubmit the product for admin approval. Product status cannot be supplied by the vendor.',
+  })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiResponse({ status: 200, description: 'Product updated and set to pending approval' })
+  @ApiResponse({ status: 400, description: 'Invalid product fields' })
+  @ApiResponse({ status: 404, description: 'Owned product not found' })
+  updateMyProduct(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Body() dto: UpdateProductDto,
+  ) {
+    return this.productsService.updateProduct(
+      id,
+      req.user.userId,
+      UserRole.VENDOR,
+      dto,
+    );
+  }
+
+  @Delete(':id')
+  @Roles('VENDOR')
+  @ApiBearerAuth('access-token')
+  @ApiOperation({ summary: "Delete a product owned by the authenticated vendor" })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiResponse({ status: 200, description: 'Product deleted' })
+  @ApiResponse({ status: 404, description: 'Owned product not found' })
+  @ApiResponse({ status: 409, description: 'Products with order history cannot be deleted' })
+  deleteMyProduct(
+    @Req() req: AuthenticatedRequest,
+    @Param('id') id: string,
+  ) {
+    return this.productsService.deleteProduct(
+      id,
+      req.user.userId,
+      UserRole.VENDOR,
+    );
   }
 
   // Public: Upload product image

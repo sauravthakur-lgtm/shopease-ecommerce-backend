@@ -17,6 +17,14 @@ async function bootstrap() {
       fallthrough: false,
     }),
   );
+  app.use(
+    '/uploads/profiles',
+    express.static(join(process.cwd(), 'uploads', 'profiles'), {
+      dotfiles: 'deny',
+      index: false,
+      fallthrough: false,
+    }),
+  );
 
   app.enableCors({
     origin: [
