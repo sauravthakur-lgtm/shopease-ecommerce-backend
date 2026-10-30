@@ -1,6 +1,7 @@
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProductsService } from '../products/products.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AdminService } from './admin.service';
 
 describe('AdminService.updateProductImage', () => {
@@ -27,6 +28,7 @@ describe('AdminService.updateProductImage', () => {
       prisma,
       {} as MailService,
       productsService,
+      {} as NotificationsService,
     );
 
     const result = await service.updateProductImage(

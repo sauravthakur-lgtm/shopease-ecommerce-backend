@@ -10,12 +10,14 @@ import { AnalyticsDateRangeDto, SalesReportQueryDto } from './dto/analytics-quer
 import { MailService } from '../mail/mail.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ProductsService } from '../products/products.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 function createAdminService(prisma: Partial<PrismaService>) {
   return new AdminService(
     prisma as PrismaService,
     {} as MailService,
     {} as ProductsService,
+    {} as NotificationsService,
   );
 }
 

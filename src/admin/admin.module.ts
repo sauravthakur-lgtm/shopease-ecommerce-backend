@@ -6,11 +6,13 @@ import { PrismaModule } from '../prisma/prisma.module';
 import { MailModule } from '../mail/mail.module';
 import { ProductsModule } from '../products/products.module';
 import { ProfileService } from '../profiles/profile.service';
+import { NotificationsModule } from '../notifications/notifications.module';
 @Module({
   imports: [
   PrismaModule,
   MailModule,
   ProductsModule,
+  NotificationsModule,
 ],
   controllers: [AdminController],
   providers: [AdminService, ProfileService],

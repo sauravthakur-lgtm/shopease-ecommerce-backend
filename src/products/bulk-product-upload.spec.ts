@@ -10,6 +10,7 @@ import {
 import { bulkProductUploadOptions } from './bulk-product-upload-options';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
+import { NotificationsService } from '../notifications/notifications.service';
 
 const csv = (body: string) =>
   Buffer.from(`name,description,category,price,stock,imageUrl\n${body}`, 'utf8');
@@ -113,17 +114,27 @@ describe('ProductsService bulk product import', () => {
   const createService = (
     existingProducts: Array<{ name: string; category: string | null }> = [],
   ) => {
+    let createdCount = 0;
     const prisma = {
       product: {
         findMany: jest.fn().mockResolvedValue(existingProducts),
-        create: jest.fn().mockResolvedValue({ id: 'created-product' }),
+        create: jest.fn().mockImplementation(() =>
+          Promise.resolve({ id: `created-product-${++createdCount}` }),
+        ),
       },
+      $transaction: jest.fn((callback: (tx: unknown) => unknown) =>
+        callback(prisma),
+      ),
     } as unknown as PrismaService;
+    const notificationsService = {
+      notifyAdmins: jest.fn().mockResolvedValue(1),
+    };
     const service = new ProductsService(
       prisma,
       {} as RedisService,
+      notificationsService as unknown as NotificationsService,
     );
-    return { prisma, service };
+    return { prisma, service, notificationsService };
   };
 
   it('validates without creating products and imports valid rows only', async () => {
@@ -193,5 +204,53 @@ describe('ProductsService bulk product import', () => {
         data: expect.objectContaining({ vendorId: 'jwt-vendor' }),
       }),
     );
+  });
+
+  it('sends one admin review summary per bulk import instead of one per row', async () => {
+    const { prisma, service, notificationsService } = createService();
+    const create = jest.spyOn(prisma.product, 'create');
+    const file = {
+      buffer: csv('First Item,One,Clothes,15,2,\nSecond Item,Two,Clothes,16,3,\nThird Item,Three,Clothes,17,4,'),
+    } as Express.Multer.File;
+
+    await service.bulkUploadProducts('vendor-1', file, true);
+    expect(notificationsService.notifyAdmins).not.toHaveBeenCalled();
+
+    const result = await service.bulkUploadProducts('vendor-1', file);
+
+    expect(result).toMatchObject({ successful: 3, failed: 0 });
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(notificationsService.notifyAdmins).toHaveBeenCalledTimes(1);
+    expect(notificationsService.notifyAdmins).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        type: 'PRODUCT_PENDING_REVIEW',
+        data: { vendorId: 'vendor-1', productCount: 3 },
+        dedupeKey: 'product-bulk-review:created-product-1',
+      }),
+    );
+  });
+
+  it('does not send a review summary when no rows were imported', async () => {
+    const { service, notificationsService } = createService([
+      { name: 'Canvas Tote', category: 'Clothes' },
+    ]);
+
+    await service.bulkUploadProducts('vendor-1', {
+      buffer: csv('Canvas Tote,First,Clothes,15,2,'),
+    } as Express.Multer.File);
+
+    expect(notificationsService.notifyAdmins).not.toHaveBeenCalled();
+  });
+
+  it('keeps a completed import successful when the summary notification fails', async () => {
+    const { service, notificationsService } = createService();
+    notificationsService.notifyAdmins.mockRejectedValueOnce(new Error('database unavailable'));
+
+    await expect(
+      service.bulkUploadProducts('vendor-1', {
+        buffer: csv('Only Item,One,Clothes,15,2,'),
+      } as Express.Multer.File),
+    ).resolves.toMatchObject({ success: true, successful: 1 });
   });
 });

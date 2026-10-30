@@ -19,6 +19,11 @@ import {
   validateProductCsv,
 } from './bulk-product-upload';
 import { UpdateProductDto } from './dto/update-product.dto';
+import { NotificationsService } from '../notifications/notifications.service';
+import {
+  bulkProductsPendingReviewNotification,
+  productPendingReviewNotification,
+} from '../notifications/notification-events';
 
 const approvedProductSelect = {
   id: true,
@@ -48,32 +53,53 @@ export class ProductsService {
   constructor(
   private readonly prisma: PrismaService,
   private readonly redisService: RedisService,
+  private readonly notificationsService: NotificationsService,
 ) {}
-  // Create product
-  async createProduct(vendorId: string, dto: CreateProductDto) {
-    const product = await this.prisma.product.create({
-      data: {
-        name: dto.name,
-        description: dto.description,
-        imageUrl: dto.imageUrl ?? null,
-        category: normalizeProductCategory(dto.category),
-        price: new Prisma.Decimal(dto.price),
-        stock: dto.stock,
-        vendorId,
-        status: ProductStatus.PENDING,
-      },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        price: true,
-        stock: true,
-        status: true,
-        imageUrl: true,
-        category: true,
-        vendorId: true,
-        createdAt: true,
-      },
+  // Create product. Bulk imports pass notifyAdmins: false and send one summary instead.
+  async createProduct(
+    vendorId: string,
+    dto: CreateProductDto,
+    options: { notifyAdmins?: boolean } = {},
+  ) {
+    const notifyAdmins = options.notifyAdmins ?? true;
+    const product = await this.prisma.$transaction(async (tx) => {
+      const createdProduct = await tx.product.create({
+        data: {
+          name: dto.name,
+          description: dto.description,
+          imageUrl: dto.imageUrl ?? null,
+          category: normalizeProductCategory(dto.category),
+          price: new Prisma.Decimal(dto.price),
+          stock: dto.stock,
+          vendorId,
+          status: ProductStatus.PENDING,
+        },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          price: true,
+          stock: true,
+          status: true,
+          imageUrl: true,
+          category: true,
+          vendorId: true,
+          createdAt: true,
+        },
+      });
+
+      if (notifyAdmins) {
+        await this.notificationsService.notifyAdmins(
+          tx,
+          productPendingReviewNotification(
+            createdProduct,
+            createdProduct.createdAt,
+            'created',
+          ),
+        );
+      }
+
+      return createdProduct;
     });
 
     return {
@@ -106,37 +132,63 @@ export class ProductsService {
       throw new NotFoundException('Product not found.');
     }
 
-    const updatedProduct = await this.prisma.product.update({
-      where,
-      data: {
-        ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
-        ...(dto.description !== undefined
-          ? { description: dto.description?.trim() || null }
-          : {}),
-        ...(dto.category !== undefined
-          ? { category: normalizeProductCategory(dto.category) }
-          : {}),
-        ...(dto.price !== undefined
-          ? { price: new Prisma.Decimal(dto.price) }
-          : {}),
-        ...(dto.stock !== undefined ? { stock: dto.stock } : {}),
-        ...(dto.imageUrl !== undefined
-          ? { imageUrl: dto.imageUrl || null }
-          : {}),
-        ...(role === UserRole.VENDOR ? { status: ProductStatus.PENDING } : {}),
-      },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        imageUrl: true,
-        category: true,
-        price: true,
-        stock: true,
-        status: true,
-        vendorId: true,
-        updatedAt: true,
-      },
+    const updatedProduct = await this.prisma.$transaction(async (tx) => {
+      // Detect the actual transition to PENDING atomically, so editing a product
+      // that is already pending (or concurrent edits) does not notify admins again.
+      const returnedToReview =
+        role === UserRole.VENDOR &&
+        (
+          await tx.product.updateMany({
+            where: { id: productId, status: { not: ProductStatus.PENDING } },
+            data: { status: ProductStatus.PENDING },
+          })
+        ).count > 0;
+
+      const changedProduct = await tx.product.update({
+        where,
+        data: {
+          ...(dto.name !== undefined ? { name: dto.name.trim() } : {}),
+          ...(dto.description !== undefined
+            ? { description: dto.description?.trim() || null }
+            : {}),
+          ...(dto.category !== undefined
+            ? { category: normalizeProductCategory(dto.category) }
+            : {}),
+          ...(dto.price !== undefined
+            ? { price: new Prisma.Decimal(dto.price) }
+            : {}),
+          ...(dto.stock !== undefined ? { stock: dto.stock } : {}),
+          ...(dto.imageUrl !== undefined
+            ? { imageUrl: dto.imageUrl || null }
+            : {}),
+          ...(role === UserRole.VENDOR ? { status: ProductStatus.PENDING } : {}),
+        },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          imageUrl: true,
+          category: true,
+          price: true,
+          stock: true,
+          status: true,
+          vendorId: true,
+          updatedAt: true,
+        },
+      });
+
+      if (returnedToReview) {
+        await this.notificationsService.notifyAdmins(
+          tx,
+          productPendingReviewNotification(
+            changedProduct,
+            changedProduct.updatedAt,
+            'updated',
+          ),
+        );
+      }
+
+      return changedProduct;
     });
 
     return {
@@ -264,14 +316,18 @@ export class ProductsService {
 
     let successful = 0;
     const successfulRows: number[] = [];
+    const createdProductIds: string[] = [];
 
     for (const candidate of candidates) {
       if (!candidate.dto) continue;
 
       try {
-        await this.createProduct(vendorId, candidate.dto);
+        const { product } = await this.createProduct(vendorId, candidate.dto, {
+          notifyAdmins: false,
+        });
         successful += 1;
         successfulRows.push(candidate.row);
+        createdProductIds.push(product.id);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         this.logger.error(
@@ -283,6 +339,10 @@ export class ProductsService {
           message: 'The product could not be saved because of a server error.',
         });
       }
+    }
+
+    if (createdProductIds.length > 0) {
+      await this.notifyAdminsOfBulkUpload(vendorId, createdProductIds);
     }
 
     const finalErrors = candidates.flatMap((candidate) => candidate.errors);
@@ -301,6 +361,22 @@ export class ProductsService {
 
   private getBulkDuplicateKey(name: string, category: string) {
     return `${name.trim().toLocaleLowerCase('en')}\u0000${normalizeProductCategory(category).toLocaleLowerCase('en')}`;
+  }
+
+  // Rows are committed one by one, so the summary runs after them and a failure
+  // here is logged rather than reported as a failed import.
+  private async notifyAdminsOfBulkUpload(vendorId: string, productIds: string[]) {
+    try {
+      await this.notificationsService.notifyAdmins(
+        this.prisma,
+        bulkProductsPendingReviewNotification(vendorId, productIds),
+      );
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Bulk upload review notification failed for vendor ${vendorId}: ${detail}`,
+      );
+    }
   }
 
   // Upload product image

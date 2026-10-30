@@ -130,6 +130,49 @@ Example import response:
 
 Malformed files and invalid headers return the standard NestJS `400` error response instead of a row result. Row validation errors use the `errors` array above. To test in Postman, sign in as an active vendor and copy the JWT; request the template using that bearer token; create a `POST` to the bulk-upload path with `Authorization: Bearer <token>` and `Body` → `form-data` → key `file` (type **File**); first set query `validateOnly=true` to inspect the preview, then submit the same file with `validateOnly=false` or no query to import. Admin approval remains a separate workflow. ZIP/image archive import and cross-upload locking are not supported.
 
+## Notifications
+
+In-app notifications are stored in the `Notification` table. Every endpoint requires a bearer JWT (any role) and only ever reads or changes the caller's own notifications; the recipient is never taken from the request.
+
+- `GET /api/notifications?page=1&limit=20&unreadOnly=false` lists notifications newest first with `total`, `page`, `limit`, and `totalPages`. `limit` values above 50 are clamped to 50.
+- `GET /api/notifications/unread-count` returns `{ "success": true, "unreadCount": 3 }`.
+- `PATCH /api/notifications/read-all` marks all of the caller's notifications as read.
+- `PATCH /api/notifications/:id/read` marks one notification as read. `DELETE /api/notifications/:id` deletes one. IDs must be UUIDs; another user's notification returns `404`.
+
+Notifications are created by these events:
+
+| Event | Recipient |
+|---|---|
+| Order placed (`POST /api/orders`, `POST /api/orders/checkout`) | Customer |
+| Admin changes an order's status (only when it actually changes) | Customer |
+| `POST /api/payments/verify` succeeds | Customer |
+| Verified Razorpay `payment.failed` webhook for a pending order | Customer |
+| Product approved or rejected (`PATCH /api/admin/products/:id/approve` / `reject`) | Product vendor |
+| Vendor creates a product, or a vendor edit returns a reviewed product to `PENDING` | Active admins (one summary per CSV bulk import) |
+| Vendor registers / vendor is approved | Active admins / the vendor |
+
+Notifications are written in the same database transaction as the business change, so they only exist when that change commits; if the notification insert fails, the change is rolled back too. The CSV bulk-import summary is the exception: rows commit one at a time, so the summary is sent afterwards and a failure is only logged. Each event has a dedupe key that is unique per recipient, so repeated requests and webhook redeliveries do not create duplicates. Notification data holds only IDs and status values; no emails, phone numbers, addresses, tokens, or payment signatures are stored.
+
+`PATCH /api/admin/products/:id/reject` rejects a `PENDING` product. It accepts an optional body `{"reason":"..."}` (at most 500 characters), which is included in the vendor's notification only and is not stored on the product.
+
+### Razorpay payment webhook
+
+`POST /api/payments/webhook` receives Razorpay webhooks without a JWT. It verifies the `X-Razorpay-Signature` header (HMAC SHA-256 of the exact raw request body) before reading the payload, and processes only `payment.failed`; other verified events are acknowledged and ignored. The failed payment is mapped to an order the same way `/api/payments/verify` does it: the Razorpay order is fetched from Razorpay and its `receipt` is the ShopEase order ID.
+
+To enable it:
+
+1. In the Razorpay Dashboard, open **Settings → Webhooks**, add `https://<your-host>/api/payments/webhook`, choose a secret, and enable the `payment.failed` event.
+2. Add the same secret to `.env`:
+
+   ```env
+   RAZORPAY_WEBHOOK_SECRET=<webhook secret from the Razorpay dashboard>
+   ```
+
+   This is different from `RAZORPAY_KEY_SECRET`. Never commit the real value.
+3. Restart the server. Until the variable is set, the webhook responds `503` and does nothing; the rest of the API is unaffected.
+
+For local testing, Razorpay must be able to reach your machine, for example through a tunnel.
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

@@ -35,6 +35,7 @@ model User {
   resetPasswordExpires DateTime?
   addresses            CustomerAddress[]
   reviews Review[]
+  notifications        Notification[]
 }
 
 
@@ -215,4 +216,36 @@ model Review {
 
   @@unique([customerId, productId])
   @@index([productId])
+}
+
+enum NotificationType {
+  ORDER_PLACED
+  ORDER_STATUS_CHANGED
+  PAYMENT_SUCCEEDED
+  PAYMENT_FAILED
+  PRODUCT_APPROVED
+  PRODUCT_REJECTED
+  PRODUCT_PENDING_REVIEW
+  VENDOR_PENDING_APPROVAL
+  VENDOR_APPROVED
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  data      Json?
+  isRead    Boolean          @default(false)
+  readAt    DateTime?
+  // Stable event key; unique per recipient. NULL keys are never treated as duplicates.
+  dedupeKey String?
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, isRead])
+  @@index([userId, createdAt])
 }

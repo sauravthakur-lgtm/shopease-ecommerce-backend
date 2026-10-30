@@ -16,12 +16,32 @@ import {
   SalesReportQueryDto,
   TopProductsQueryDto,
 } from './dto/analytics-query.dto';
+import { RejectProductDto } from './dto/reject-product.dto';
+import { NotificationsService } from '../notifications/notifications.service';
+import {
+  orderStatusChangedNotification,
+  productApprovedNotification,
+  productRejectedNotification,
+  vendorApprovedNotification,
+} from '../notifications/notification-events';
 
 const REVENUE_ORDER_STATUSES: OrderStatus[] = [
   OrderStatus.CONFIRMED,
   OrderStatus.SHIPPED,
   OrderStatus.DELIVERED,
 ];
+
+const reviewedProductSelect = {
+  id: true,
+  name: true,
+  description: true,
+  price: true,
+  stock: true,
+  status: true,
+  imageUrl: true,
+  vendorId: true,
+  updatedAt: true,
+} satisfies Prisma.ProductSelect;
 
 type DateRange = {
   startDate?: Date;
@@ -50,6 +70,7 @@ export class AdminService {
   private readonly prisma: PrismaService,
   private readonly mailService: MailService,
   private readonly productsService: ProductsService,
+  private readonly notificationsService: NotificationsService,
 ) {}
 
   async getAnalyticsSummary(query: AnalyticsDateRangeDto) {
@@ -307,16 +328,35 @@ export class AdminService {
       throw new ForbiddenException('Vendor is already active');
     }
 
-    const updatedVendor = await this.prisma.user.update({
-      where: { id },
-      data: { isActive: true },
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        role: true,
-        isActive: true,
-      },
+    const updatedVendor = await this.prisma.$transaction(async (tx) => {
+      // Conditional update: repeated or concurrent approvals activate (and notify) once.
+      const activation = await tx.user.updateMany({
+        where: { id, role: UserRole.VENDOR, isActive: false },
+        data: { isActive: true },
+      });
+
+      if (activation.count === 0) {
+        throw new ForbiddenException('Vendor is already active');
+      }
+
+      const { updatedAt, ...activatedVendor } = await tx.user.findUniqueOrThrow({
+        where: { id },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          isActive: true,
+          updatedAt: true,
+        },
+      });
+
+      await this.notificationsService.create(
+        tx,
+        vendorApprovedNotification({ id, updatedAt }),
+      );
+
+      return activatedVendor;
     });
 
     return {
@@ -499,27 +539,90 @@ export class AdminService {
       );
     }
 
-    const updatedProduct = await this.prisma.product.update({
-      where: { id },
-      data: {
-        status: ProductStatus.APPROVED,
-      },
-      select: {
-        id: true,
-        name: true,
-        description: true,
-        price: true,
-        stock: true,
-        status: true,
-        imageUrl: true,
-        vendorId: true,
-        updatedAt: true,
-      },
+    const updatedProduct = await this.prisma.$transaction(async (tx) => {
+      // Conditional update: a concurrent approval or rejection cannot be applied twice.
+      const approval = await tx.product.updateMany({
+        where: { id, status: ProductStatus.PENDING },
+        data: {
+          status: ProductStatus.APPROVED,
+        },
+      });
+
+      if (approval.count === 0) {
+        throw new ForbiddenException(
+          'Only pending products can be approved',
+        );
+      }
+
+      const approvedProduct = await tx.product.findUniqueOrThrow({
+        where: { id },
+        select: reviewedProductSelect,
+      });
+
+      await this.notificationsService.create(
+        tx,
+        productApprovedNotification(approvedProduct),
+      );
+
+      return approvedProduct;
     });
 
     return {
       success: true,
       message: 'Product approved successfully',
+      product: updatedProduct,
+    };
+  }
+
+  // Reject a product
+  async rejectProduct(id: string, dto?: RejectProductDto) {
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      select: { id: true, status: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    if (product.status !== ProductStatus.PENDING) {
+      throw new ForbiddenException(
+        'Only pending products can be rejected',
+      );
+    }
+
+    const reason = dto?.reason || undefined;
+
+    const updatedProduct = await this.prisma.$transaction(async (tx) => {
+      const rejection = await tx.product.updateMany({
+        where: { id, status: ProductStatus.PENDING },
+        data: {
+          status: ProductStatus.REJECTED,
+        },
+      });
+
+      if (rejection.count === 0) {
+        throw new ForbiddenException(
+          'Only pending products can be rejected',
+        );
+      }
+
+      const rejectedProduct = await tx.product.findUniqueOrThrow({
+        where: { id },
+        select: reviewedProductSelect,
+      });
+
+      await this.notificationsService.create(
+        tx,
+        productRejectedNotification(rejectedProduct, reason),
+      );
+
+      return rejectedProduct;
+    });
+
+    return {
+      success: true,
+      message: 'Product rejected successfully',
       product: updatedProduct,
     };
   }
@@ -606,6 +709,19 @@ async updateOrderStatus(
       where: { id },
       data: { status: dto.status },
     });
+
+    if (currentOrder.status !== dto.status) {
+      await this.notificationsService.create(
+        tx,
+        orderStatusChangedNotification(
+          currentOrder,
+          currentOrder.status,
+          dto.status,
+          currentOrder.updatedAt,
+        ),
+      );
+    }
+
     return { order: currentOrder, updatedOrder: changedOrder };
   });
 

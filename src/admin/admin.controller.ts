@@ -34,6 +34,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto/update-order-status.dto';
 import { productImageUploadOptions } from '../products/product-image-upload';
 import { UpdateProductDto } from '../products/dto/update-product.dto';
+import { RejectProductDto } from './dto/reject-product.dto';
 import {
   AnalyticsDateRangeDto,
   SalesReportQueryDto,
@@ -267,6 +268,22 @@ export class AdminController {
   @ApiResponse({ status: 403, description: 'Administrator role required' })
   approveProduct(@Param('id') id: string) {
     return this.adminService.approveProduct(id);
+  }
+
+  @Patch('products/:id/reject')
+  @ApiOperation({
+    summary: 'Reject a pending product',
+    description:
+      'Sets the product status to REJECTED and notifies its vendor. The optional reason is included in the vendor notification only.',
+  })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiResponse({ status: 200, description: 'Product rejected' })
+  @ApiResponse({ status: 400, description: 'Invalid rejection reason' })
+  @ApiResponse({ status: 401, description: 'Missing or invalid bearer token' })
+  @ApiResponse({ status: 403, description: 'Administrator role required or product is not pending' })
+  @ApiResponse({ status: 404, description: 'Product not found' })
+  rejectProduct(@Param('id') id: string, @Body() dto: RejectProductDto) {
+    return this.adminService.rejectProduct(id, dto);
   }
 
   @Get('products')

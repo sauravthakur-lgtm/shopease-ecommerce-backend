@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { MailService } from '../mail/mail.service';
 import { ProductsService } from '../products/products.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AdminService } from './admin.service';
 import { ProductStatus } from '@prisma/client';
 
@@ -24,6 +25,7 @@ describe('AdminService.deactivateVendor', () => {
       prisma,
       {} as MailService,
       {} as ProductsService,
+      {} as NotificationsService,
     );
     return { prisma, service, userUpdate, productUpdateMany };
   };

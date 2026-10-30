@@ -17,6 +17,7 @@ import { RedisModule } from './redis/redis.module';
 import { ReviewsModule } from './reviews/reviews.module';
 import { CouponsModule } from './coupons/coupons.module';
 import { VendorModule } from './vendor/vendor.module';
+import { NotificationsModule } from './notifications/notifications.module';
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -34,6 +35,7 @@ import { VendorModule } from './vendor/vendor.module';
     ReviewsModule,
     CouponsModule,
     VendorModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

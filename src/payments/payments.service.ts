@@ -4,18 +4,56 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  Logger,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { ConfigService } from '@nestjs/config';
 import Razorpay from 'razorpay';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { NotificationsService } from '../notifications/notifications.service';
+import {
+  paymentFailedNotification,
+  paymentSucceededNotification,
+} from '../notifications/notification-events';
+
+interface RazorpayWebhookEvent {
+  event?: unknown;
+  payload?: {
+    payment?: {
+      entity?: {
+        id?: unknown;
+        order_id?: unknown;
+      };
+    };
+  };
+}
+
+function isValidHmacSignature(
+  payload: string | Buffer,
+  signature: string,
+  secret: string,
+) {
+  const expected = Buffer.from(
+    createHmac('sha256', secret).update(payload).digest('hex'),
+    'hex',
+  );
+  const received = Buffer.from(signature, 'hex');
+
+  return (
+    expected.length === received.length && timingSafeEqual(expected, received)
+  );
+}
+
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
   private razorpay: Razorpay;
 constructor(
   private configService: ConfigService,
   private prisma: PrismaService,
   private mailService: MailService,
+  private notificationsService: NotificationsService,
 ) {
   this.razorpay = new Razorpay({
     key_id: this.configService.getOrThrow<string>('RAZORPAY_KEY_ID'),
@@ -130,23 +168,42 @@ async verifyPayment(
     );
   }
 
-  const confirmedOrder = await this.prisma.order.update({
-  where: { id: order.id },
-  data: { status: 'CONFIRMED' },
-  include: {
-    customer: {
-      select: {
-        name: true,
-        email: true,
+  const confirmedOrder = await this.prisma.$transaction(async (tx) => {
+    // Conditional update: concurrent or repeated verifications cannot confirm
+    // the same order (or create its success notification) twice.
+    const confirmation = await tx.order.updateMany({
+      where: { id: order.id, status: 'PENDING' },
+      data: { status: 'CONFIRMED' },
+    });
+
+    if (confirmation.count === 0) {
+      throw new BadRequestException('Order is not pending');
+    }
+
+    const updatedOrder = await tx.order.findUniqueOrThrow({
+      where: { id: order.id },
+      include: {
+        customer: {
+          select: {
+            name: true,
+            email: true,
+          },
+        },
+        product: {
+          select: {
+            name: true,
+          },
+        },
       },
-    },
-    product: {
-      select: {
-        name: true,
-      },
-    },
-  },
-});
+    });
+
+    await this.notificationsService.create(
+      tx,
+      paymentSucceededNotification(updatedOrder, razorpay_payment_id),
+    );
+
+    return updatedOrder;
+  });
 
 try {
   await this.mailService.sendEmail(
@@ -173,5 +230,65 @@ return {
   message: 'Payment verified and order confirmed successfully',
   order: confirmedOrder,
 };
+}
+
+async handleWebhook(rawBody: Buffer | undefined, signature: string | undefined) {
+  const secret = this.configService.get<string>('RAZORPAY_WEBHOOK_SECRET');
+  if (!secret) {
+    this.logger.error('Razorpay webhook rejected: RAZORPAY_WEBHOOK_SECRET is not configured.');
+    throw new ServiceUnavailableException('Payment webhook is not configured');
+  }
+
+  // The signature covers the exact bytes Razorpay sent, so verify before parsing.
+  if (!rawBody || !signature || !isValidHmacSignature(rawBody, signature, secret)) {
+    throw new BadRequestException('Invalid webhook signature');
+  }
+
+  let webhookEvent: RazorpayWebhookEvent;
+  try {
+    webhookEvent = JSON.parse(rawBody.toString('utf8')) as RazorpayWebhookEvent;
+  } catch {
+    throw new BadRequestException('Invalid webhook payload');
+  }
+
+  if (webhookEvent?.event !== 'payment.failed') {
+    return { success: true, message: 'Webhook event ignored' };
+  }
+
+  const payment = webhookEvent.payload?.payment?.entity;
+  if (typeof payment?.id !== 'string' || typeof payment.order_id !== 'string') {
+    this.logger.warn('Ignored payment.failed webhook without a Razorpay order reference.');
+    return { success: true, message: 'Webhook event ignored' };
+  }
+
+  // Same mapping as /payments/verify: the Razorpay order receipt is our order ID,
+  // read back from Razorpay rather than from the webhook body.
+  const razorpayOrder = await this.razorpay.orders.fetch(payment.order_id);
+  const databaseOrderId = razorpayOrder.receipt;
+  const order = databaseOrderId
+    ? await this.prisma.order.findUnique({
+        where: { id: databaseOrderId },
+        select: { id: true, customerId: true, status: true },
+      })
+    : null;
+
+  if (!order) {
+    this.logger.warn(
+      `Ignored payment.failed webhook for payment ${payment.id}: no matching order.`,
+    );
+    return { success: true, message: 'Webhook event ignored' };
+  }
+
+  // A failure for an order that has since been paid or cancelled is not actionable.
+  if (order.status !== 'PENDING') {
+    return { success: true, message: 'Webhook event ignored' };
+  }
+
+  await this.notificationsService.create(
+    this.prisma,
+    paymentFailedNotification(order, payment.id),
+  );
+
+  return { success: true, message: 'Payment failure processed' };
 }
 }

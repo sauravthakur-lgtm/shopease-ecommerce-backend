@@ -11,12 +11,15 @@ import { MailService } from '../mail/mail.service';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { NotificationsService } from '../notifications/notifications.service';
+import { vendorPendingApprovalNotification } from '../notifications/notification-events';
 @Injectable()
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly mailService: MailService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   // Register
@@ -34,22 +37,34 @@ export class AuthService {
     const hashedPassword = await bcrypt.hash(dto.password, 10);
 
     try {
-      const user = await this.prisma.user.create({
-        data: {
-          name: dto.name.trim(),
-          email,
-          password: hashedPassword,
-          role: dto.role,
-          isActive: dto.role === 'CUSTOMER',
-        },
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          role: true,
-          isActive: true,
-          createdAt: true,
-        },
+      const user = await this.prisma.$transaction(async (tx) => {
+        const createdUser = await tx.user.create({
+          data: {
+            name: dto.name.trim(),
+            email,
+            password: hashedPassword,
+            role: dto.role,
+            isActive: dto.role === 'CUSTOMER',
+          },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            role: true,
+            isActive: true,
+            createdAt: true,
+          },
+        });
+
+        // New vendors start inactive and need an administrator's approval.
+        if (createdUser.role === 'VENDOR') {
+          await this.notificationsService.notifyAdmins(
+            tx,
+            vendorPendingApprovalNotification(createdUser),
+          );
+        }
+
+        return createdUser;
       });
 
       // Send welcome email only to customers
@@ -153,7 +168,7 @@ async forgotPassword(email: string) {
       resetPasswordToken: hashedToken,
       resetPasswordExpires: new Date(Date.now() + 15 * 60 * 1000),
     },
-  });
+  });         
 
   const resetLink =
     `http://localhost:8080/apis/auth/reset-password?token=${rawToken}`;

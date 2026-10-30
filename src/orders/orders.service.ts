@@ -10,6 +10,8 @@ import { ProductStatus, Prisma } from '@prisma/client';
 import { MailService } from '../mail/mail.service';
 import { CouponsService } from '../coupons/coupons.service';
 import { CheckoutCouponDto } from '../coupons/dto/checkout-coupon.dto';
+import { NotificationsService } from '../notifications/notifications.service';
+import { orderPlacedNotification } from '../notifications/notification-events';
 
 @Injectable()
 export class OrdersService {
@@ -19,6 +21,7 @@ export class OrdersService {
     private readonly prisma: PrismaService,
     private readonly mailService: MailService,
     private readonly couponsService: CouponsService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async createOrder(customerId: string, dto: CreateOrderDto) {
@@ -75,7 +78,7 @@ export class OrdersService {
           )
         : undefined;
 
-      return tx.order.create({
+      const newOrder = await tx.order.create({
         data: {
           customerId,
           productId: product.id,
@@ -91,6 +94,13 @@ export class OrdersService {
           },
         },
       });
+
+      await this.notificationsService.create(
+        tx,
+        orderPlacedNotification(newOrder),
+      );
+
+      return newOrder;
     });
 
     await this.sendOrderConfirmation(
@@ -249,6 +259,11 @@ export class OrdersService {
     await tx.cartItem.deleteMany({
       where: { cartId: cart.id },
     });
+
+    await this.notificationsService.create(
+      tx,
+      orderPlacedNotification(newOrder),
+    );
 
     return newOrder;
   });
